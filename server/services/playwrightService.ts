@@ -5,7 +5,11 @@ export async function crawlWithPlaywright(url: string, headless: boolean = true)
     console.log(`[Playwright] Launching browser (headless: ${headless}) for: ${url}`);
     browser = await chromium.launch({ 
       headless: headless,
-      args: ["--disable-web-security", "--disable-features=IsolateOrigins,site-per-process"]
+      args: [
+        "--disable-web-security", 
+        "--disable-features=IsolateOrigins,site-per-process",
+        "--disable-blink-features=AutomationControlled"
+      ]
     });
     
     const context = await browser.newContext({
@@ -13,14 +17,20 @@ export async function crawlWithPlaywright(url: string, headless: boolean = true)
       viewport: { width: 1280, height: 1000 },
       extraHTTPHeaders: {
         "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-      }
+      },
+      deviceScaleFactor: 1,
     });
     
     const page = await context.newPage();
+    // Hide automation
+    await page.evaluate(`() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    }`);
+
     page.on("console", msg => console.log(`[Browser Console] ${msg.text()}`));
     
     console.log(`[Playwright] Navigating to ${url}...`);
-    await page.goto(url, { waitUntil: "commit", timeout: 60000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
     console.log(`[Playwright] Checking for challenges...`);
     const challengeSelectors = ["iframe[src*='challenges.cloudflare.com']", "#challenge-form", "#cf-challenge"];
@@ -34,19 +44,30 @@ export async function crawlWithPlaywright(url: string, headless: boolean = true)
           try {
             const box = await challengeElement.boundingBox();
             if (box) {
+              // Move mouse to the box first to simulate human
+              await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+              await page.waitForTimeout(500);
+
               // Click the approximate location of the checkbox (usually left-ish)
-              console.log(`[Playwright] Clicking challenge iframe at: ${box.x + 30}, ${box.y + box.height / 2}`);
-              await page.mouse.click(box.x + 30, box.y + box.height / 2);
-              await page.waitForTimeout(2000); // Wait for challenge to start resolving
+              const clickX = box.x + 30;
+              const clickY = box.y + box.height / 2;
+              console.log(`[Playwright] Clicking challenge iframe at: ${clickX}, ${clickY}`);
+              await page.mouse.click(clickX, clickY);
+              await page.waitForTimeout(3000); // Wait for challenge to start resolving
             }
           } catch (e) {
             console.log(`[Playwright] Failed to click challenge iframe: ${e.message}`);
           }
         }
 
-        console.log(`[Playwright] Waiting for challenge to disappear...`);
-        await page.waitForFunction(`(s) => !document.querySelector(s)`, sel, { timeout: 30000 }).catch(() => {
-          console.log(`[Playwright] Challenge ${sel} still present after 30s.`);
+        console.log(`[Playwright] Waiting for challenge to disappear or navigation...`);
+        const currentUrl = page.url();
+        await Promise.race([
+          page.waitForFunction(`(s) => !document.querySelector(s)`, sel, { timeout: 45000 }),
+          page.waitForURL((u) => u.toString() !== currentUrl, { timeout: 45000 }),
+          page.waitForNavigation({ waitUntil: "networkidle", timeout: 45000 })
+        ]).catch(() => {
+          console.log(`[Playwright] Challenge ${sel} still present or no navigation after 45s.`);
         });
       }
     }
