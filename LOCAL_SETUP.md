@@ -36,5 +36,6 @@ The app will be available at `http://localhost:3000`.
 
 ## Why use Local Mode?
 - **Bypass Robot Checkers**: Local browsers have a better "reputation" than cloud servers, making it easier to pass Cloudflare/DDoS checks.
+- **Solve Challenges Manually**: If you see a "Sorry, you have been blocked" message, you can toggle **Headless: OFF** in the app. This will open a visible browser window on your computer where you can manually click "I am human" or solve any Captchas.
 - **Screenshot Crawling**: The Advanced Mode renders the page exactly as you see it and takes "pixel-perfect" screenshots of the manga pages, which completely bypasses hotlink protection (403 errors).
-- **Performance**: Crawling is faster and more reliable when running on your own machine.
+- **Debug View**: If the crawler fails to find images, it will now show you a **Debug Screenshot** of what it actually saw, helping you diagnose if the page was blocked or redirected.

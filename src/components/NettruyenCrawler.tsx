@@ -14,7 +14,9 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
   const [htmlInput, setHtmlInput] = useState("");
   const [showManual, setShowManual] = useState(false);
   const [isAdvanced, setIsAdvanced] = useState(false);
+  const [headless, setHeadless] = useState(true);
   const [images, setImages] = useState<string[]>([]);
+  const [debugImage, setDebugImage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -25,16 +27,22 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
 
     setIsLoading(true);
     setError(null);
-    setStatus(isAdvanced ? "Launching stealth browser..." : "Bypassing robot checker...");
+    setDebugImage(null);
+    setStatus(isAdvanced ? `Launching stealth browser (${headless ? "Headless" : "Visible"})...` : "Bypassing robot checker...");
     setImages([]);
 
     try {
       const endpoint = isAdvanced ? "/api/crawl-playwright" : "/api/crawl-nettruyen";
-      const response = await axios.post(endpoint, { url });
+      const response = await axios.post(endpoint, { url, headless });
+      
+      if (response.data.debugImage) {
+        setDebugImage(response.data.debugImage);
+      }
+
       setImages(response.data.images);
       setStatus(null);
       if (response.data.images.length === 0) {
-        setError(isAdvanced ? "Advanced crawler couldn't find images. Try 'AI Extraction' mode." : "No images found. Try 'Advanced Mode' or 'AI Extraction'.");
+        setError(response.data.error || (isAdvanced ? "Advanced crawler couldn't find images. Try 'AI Extraction' mode." : "No images found. Try 'Advanced Mode' or 'AI Extraction'."));
       }
     } catch (err: any) {
       setError(err.response?.data?.error || "Failed to bypass robot checker. Nettruyen has strong protection.");
@@ -152,13 +160,24 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
           </div>
 
           <div className="flex justify-center gap-6">
-            <button
-              type="button"
-              onClick={() => setIsAdvanced(!isAdvanced)}
-              className={`text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-2 transition-all ${isAdvanced ? "text-green-600 opacity-100" : "opacity-40 hover:opacity-100"}`}
-            >
-              <Zap size={12} className={isAdvanced ? "fill-current" : ""} /> {isAdvanced ? "Advanced Mode ON" : "Enable Advanced Mode"}
-            </button>
+            <div className="flex flex-col items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsAdvanced(!isAdvanced)}
+                className={`text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-2 transition-all ${isAdvanced ? "text-green-600 opacity-100" : "opacity-40 hover:opacity-100"}`}
+              >
+                <Zap size={12} className={isAdvanced ? "fill-current" : ""} /> {isAdvanced ? "Advanced Mode ON" : "Enable Advanced Mode"}
+              </button>
+              {isAdvanced && (
+                <button
+                  type="button"
+                  onClick={() => setHeadless(!headless)}
+                  className="text-[9px] font-bold uppercase tracking-widest opacity-60 hover:opacity-100 flex items-center gap-1"
+                >
+                  {headless ? "Headless: ON (Hidden)" : "Headless: OFF (Visible)"}
+                </button>
+              )}
+            </div>
             <button
               type="button"
               onClick={() => setShowManual(!showManual)}
@@ -216,9 +235,20 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
         </form>
 
         {error && (
-          <div className="mt-6 p-4 bg-red-50 rounded-xl border border-red-100">
-            <p className="text-red-500 text-xs font-bold uppercase tracking-wider">{error}</p>
-            <p className="text-[10px] text-red-400 mt-2">Try refreshing the page or using a different chapter link.</p>
+          <div className="mt-6 p-4 bg-red-50 rounded-xl border border-red-100 text-center">
+            <div className="flex items-center justify-center gap-2 text-red-600 mb-2">
+              <ShieldAlert size={16} />
+              <span className="text-xs font-bold uppercase tracking-widest">Access Denied</span>
+            </div>
+            <p className="text-red-500 text-xs font-bold uppercase tracking-wider leading-relaxed">{error}</p>
+            <p className="text-[10px] text-red-400 mt-2 uppercase font-bold">Try refreshing the page or using a different chapter link.</p>
+            
+            {debugImage && (
+              <div className="mt-4 p-2 bg-white rounded-xl border border-red-200">
+                <p className="text-[8px] uppercase font-bold opacity-40 mb-2">Debug Screenshot (What the crawler sees):</p>
+                <img src={debugImage} alt="Debug View" className="w-full rounded-lg shadow-sm" />
+              </div>
+            )}
           </div>
         )}
       </div>
