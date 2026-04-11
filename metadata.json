@@ -1,0 +1,5 @@
+{
+  "name": "Manga Translation",
+  "description": "Auto-scan manga pages, extract text, and overlay translations in Vietnamese and Hindi.",
+  "requestFramePermissions": []
+}
