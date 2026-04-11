@@ -21,6 +21,7 @@ async function startServer() {
 
     let browser;
     try {
+      console.log(`[Playwright] Launching browser for: ${url}`);
       browser = await chromium.launch({ headless: true });
       const context = await browser.newContext({
         userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -28,51 +29,82 @@ async function startServer() {
       });
       const page = await context.newPage();
 
-      console.log(`Navigating to ${url}...`);
-      await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+      // Log browser console messages to server console
+      page.on("console", msg => console.log(`[Browser Console] ${msg.text()}`));
+      page.on("requestfailed", request => console.log(`[Browser Request Failed] ${request.url()}: ${request.failure()?.errorText}`));
 
-      // Wait for robot check if any (simple delay or wait for selector)
+      console.log(`[Playwright] Navigating to ${url}...`);
+      // Use 'domcontentloaded' instead of 'networkidle' to avoid timeouts from ads/trackers
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+      console.log(`[Playwright] DOM loaded. Waiting for stability...`);
+
+      // Wait for a few seconds for dynamic content
       await page.waitForTimeout(5000);
 
-      // Scroll to trigger lazy loading
+      // Scroll to trigger lazy loading with more feedback
+      console.log(`[Playwright] Scrolling to trigger lazy loading...`);
       await page.evaluate(async () => {
-        for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < 15; i++) {
           window.scrollBy(0, window.innerHeight);
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, 400));
         }
       });
 
       // Find manga images
-      const imageSelectors = [".reading-detail img", ".page-chapter img", "#chapter_content img"];
+      const imageSelectors = [".reading-detail img", ".page-chapter img", "#chapter_content img", ".box_doc img"];
       let images: string[] = [];
 
+      console.log(`[Playwright] Searching for images...`);
       for (const selector of imageSelectors) {
         const elements = await page.$$(selector);
         if (elements.length > 0) {
-          console.log(`Found ${elements.length} images with selector ${selector}`);
-          for (const el of elements) {
+          console.log(`[Playwright] Found ${elements.length} images with selector: ${selector}`);
+          for (let i = 0; i < elements.length; i++) {
             try {
-              // Take a screenshot of the element itself to bypass hotlink protection
+              const el = elements[i];
+              // Ensure element is visible
+              await el.scrollIntoViewIfNeeded();
+              
+              // Take a screenshot of the element
               const buffer = await el.screenshot({ type: "jpeg", quality: 80 });
               images.push(`data:image/jpeg;base64,${buffer.toString("base64")}`);
-            } catch (e) {
-              console.error("Screenshot failed for element:", e);
+              
+              if (i % 5 === 0) console.log(`[Playwright] Captured ${i + 1}/${elements.length} images...`);
+            } catch (e: any) {
+              console.error(`[Playwright] Screenshot failed for image ${i}:`, e.message);
             }
           }
-          break; // Stop if we found images with a specific selector
+          break; 
         }
       }
 
+      if (images.length === 0) {
+        console.log(`[Playwright] No images found with specific selectors. Trying generic search...`);
+        const allImgs = await page.$$("img");
+        for (const img of allImgs) {
+          const src = await img.getAttribute("src") || "";
+          if (src.includes("nettruyen") || src.includes("kcgsbok")) {
+            const buffer = await img.screenshot({ type: "jpeg", quality: 80 });
+            images.push(`data:image/jpeg;base64,${buffer.toString("base64")}`);
+          }
+        }
+      }
+
+      console.log(`[Playwright] Successfully captured ${images.length} images.`);
       await browser.close();
       res.json({ images });
     } catch (error: any) {
-      console.error("Playwright error:", error.message);
+      console.error("[Playwright Error]", error.message);
       if (browser) await browser.close();
       
       const isCloud = process.env.NODE_ENV === "production" || !process.env.HOME?.includes("/home/");
-      const errorMsg = isCloud 
-        ? "Advanced Crawler requires local setup. Please follow the instructions in LOCAL_SETUP.md to run this app on your computer."
-        : `Advanced Crawler failed: ${error.message}. Make sure you ran 'npx playwright install chromium'.`;
+      let errorMsg = error.message;
+      
+      if (isCloud) {
+        errorMsg = "Advanced Crawler requires local setup. Please follow the instructions in LOCAL_SETUP.md.";
+      } else if (error.message.includes("timeout")) {
+        errorMsg = "The site took too long to load. Try again or check your internet connection.";
+      }
       
       res.status(500).json({ error: errorMsg });
     }
