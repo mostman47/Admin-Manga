@@ -27,7 +27,7 @@ export async function crawlWithPlaywright(url: string, headless: boolean = true)
     for (const sel of challengeSelectors) {
       if (await page.$(sel)) {
         console.log(`[Playwright] Detected challenge: ${sel}. Waiting for it to be resolved...`);
-        await page.waitForFunction((s) => !document.querySelector(s), sel, { timeout: 30000 }).catch(() => {});
+        await page.waitForFunction(`(s) => !document.querySelector(s)`, sel, { timeout: 30000 }).catch(() => {});
       }
     }
 
@@ -37,7 +37,7 @@ export async function crawlWithPlaywright(url: string, headless: boolean = true)
       console.log("[Playwright] Content selectors not found within 20s.");
     });
 
-    await page.evaluate(() => {
+    await page.evaluate(`() => {
       const imgs = document.querySelectorAll("img");
       imgs.forEach(img => {
         const dataSrc = img.getAttribute("data-src") || img.getAttribute("data-original") || img.getAttribute("data-lazy-src");
@@ -47,16 +47,16 @@ export async function crawlWithPlaywright(url: string, headless: boolean = true)
           img.style.minHeight = "500px";
         }
       });
-    });
+    }`);
 
     console.log(`[Playwright] Scrolling to render images...`);
-    await page.evaluate(async () => {
-      const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    await page.evaluate(`async () => {
+      const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
       for (let i = 0; i < 20; i++) {
         window.scrollBy(0, 800);
         await delay(500);
       }
-    });
+    }`);
 
     const imageSelectors = [".reading-detail img", ".page-chapter img", "#chapter_content img", ".box_doc img"];
     let images: string[] = [];
