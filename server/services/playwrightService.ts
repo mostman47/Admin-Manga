@@ -25,9 +25,29 @@ export async function crawlWithPlaywright(url: string, headless: boolean = true)
     console.log(`[Playwright] Checking for challenges...`);
     const challengeSelectors = ["iframe[src*='challenges.cloudflare.com']", "#challenge-form", "#cf-challenge"];
     for (const sel of challengeSelectors) {
-      if (await page.$(sel)) {
-        console.log(`[Playwright] Detected challenge: ${sel}. Waiting for it to be resolved...`);
-        await page.waitForFunction(`(s) => !document.querySelector(s)`, sel, { timeout: 30000 }).catch(() => {});
+      const challengeElement = await page.$(sel);
+      if (challengeElement) {
+        console.log(`[Playwright] Detected challenge: ${sel}. Attempting to resolve...`);
+        
+        // If it's the Cloudflare Turnstile iframe, try to click the checkbox
+        if (sel.includes("iframe")) {
+          try {
+            const box = await challengeElement.boundingBox();
+            if (box) {
+              // Click the approximate location of the checkbox (usually left-ish)
+              console.log(`[Playwright] Clicking challenge iframe at: ${box.x + 30}, ${box.y + box.height / 2}`);
+              await page.mouse.click(box.x + 30, box.y + box.height / 2);
+              await page.waitForTimeout(2000); // Wait for challenge to start resolving
+            }
+          } catch (e) {
+            console.log(`[Playwright] Failed to click challenge iframe: ${e.message}`);
+          }
+        }
+
+        console.log(`[Playwright] Waiting for challenge to disappear...`);
+        await page.waitForFunction(`(s) => !document.querySelector(s)`, sel, { timeout: 30000 }).catch(() => {
+          console.log(`[Playwright] Challenge ${sel} still present after 30s.`);
+        });
       }
     }
 
