@@ -18,7 +18,7 @@ export async function crawlWithPlaywright(url: string, headless: boolean = true)
     
     const context = await browser.newContext({
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      viewport: { width: 1280, height: 1000 },
+      viewport: { width: 1920, height: 1080 },
       extraHTTPHeaders: {
         "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
       },
@@ -29,47 +29,66 @@ export async function crawlWithPlaywright(url: string, headless: boolean = true)
     page.on("console", msg => console.log(`[Browser Console] ${msg.text()}`));
     
     console.log(`[Playwright] Navigating to ${url}...`);
-    // Use a more natural navigation
     await page.goto(url, { waitUntil: "networkidle", timeout: 90000 }).catch(e => {
-      console.log(`[Playwright] Navigation timeout/error (continuing anyway): ${e.message}`);
+      console.log(`[Playwright] Initial navigation timeout (continuing): ${e.message}`);
     });
 
     console.log(`[Playwright] Checking for challenges...`);
     const challengeSelectors = ["iframe[src*='challenges.cloudflare.com']", "#challenge-form", "#cf-challenge"];
     
-    // Try to resolve challenges multiple times if needed
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       let foundChallenge = false;
-      for (const sel of challengeSelectors) {
-        const challengeElement = await page.$(sel);
-        if (challengeElement) {
-          foundChallenge = true;
-          console.log(`[Playwright] Detected challenge: ${sel} (Attempt ${attempt + 1}). Attempting to resolve...`);
-          
-          if (sel.includes("iframe")) {
+      
+      // 1. Try Frame-level interaction (More precise)
+      const frames = page.frames();
+      const cfFrame = frames.find(f => f.url().includes('challenges.cloudflare.com'));
+      
+      if (cfFrame) {
+        foundChallenge = true;
+        console.log(`[Playwright] Found Cloudflare frame. Attempting internal click (Attempt ${attempt + 1})...`);
+        try {
+          // Try to find the checkbox or the stage container
+          const selectors = ['input[type="checkbox"]', '#challenge-stage', 'body'];
+          for (const s of selectors) {
+            const el = await cfFrame.$(s);
+            if (el) {
+              await el.click({ delay: 100 + Math.random() * 200 }).catch(() => {});
+              console.log(`[Playwright] Clicked ${s} inside frame.`);
+              break;
+            }
+          }
+          await page.waitForTimeout(5000);
+        } catch (e) {
+          console.log(`[Playwright] Frame click error: ${e.message}`);
+        }
+      }
+
+      // 2. Fallback to Coordinate-level interaction (if frame click didn't resolve it)
+      if (foundChallenge) {
+        for (const sel of challengeSelectors) {
+          const challengeElement = await page.$(sel);
+          if (challengeElement) {
+            console.log(`[Playwright] Challenge ${sel} still visible. Trying coordinate click...`);
             try {
               const box = await challengeElement.boundingBox();
               if (box) {
-                // Human-like mouse movement
-                console.log(`[Playwright] Moving mouse to challenge...`);
-                await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
-                await page.waitForTimeout(800);
-
-                const clickX = box.x + 30 + Math.random() * 10;
-                const clickY = box.y + box.height / 2 + (Math.random() * 4 - 2);
-                
-                console.log(`[Playwright] Clicking challenge checkbox at: ${clickX}, ${clickY}`);
-                await page.mouse.click(clickX, clickY, { delay: 50 + Math.random() * 100 });
-                await page.waitForTimeout(5000); 
+                await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 15 });
+                await page.mouse.click(box.x + 35 + Math.random() * 5, box.y + box.height / 2, { delay: 150 });
+                await page.waitForTimeout(5000);
               }
-            } catch (e) {
-              console.log(`[Playwright] Failed to interact with challenge: ${e.message}`);
-            }
+            } catch (e) {}
           }
         }
       }
+
       if (!foundChallenge) break;
-      await page.waitForTimeout(2000);
+      
+      // Check if we navigated away or content appeared
+      const hasContent = await page.$(".reading-detail, .page-chapter, #chapter_content").catch(() => null);
+      if (hasContent) {
+        console.log(`[Playwright] Content detected! Challenge resolved.`);
+        break;
+      }
     }
 
     console.log(`[Playwright] Waiting for content or navigation...`);
