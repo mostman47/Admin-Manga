@@ -7,7 +7,7 @@ export async function crawlWithSelenium(url: string) {
   try {
     console.log(`[Selenium] Launching browser for: ${url}`);
     const options = new chrome.Options();
-    options.addArguments("--headless");
+    options.addArguments("--headless=new");
     options.addArguments("--no-sandbox");
     options.addArguments("--disable-dev-shm-usage");
     options.addArguments("--window-size=1920,1080");
@@ -40,26 +40,45 @@ export async function crawlWithSelenium(url: string) {
 
     // Look for Cloudflare challenge
     try {
-      const frames = await driver.findElements(By.css("iframe[src*='challenges.cloudflare.com']"));
+      let frames: any[] = [];
+      for (let i = 0; i < 5; i++) {
+        console.log(`[Selenium] Searching for Cloudflare iframe (Attempt ${i + 1})...`);
+        frames = await driver.findElements(By.css("iframe[src*='challenges.cloudflare.com']"));
+        if (frames.length > 0) break;
+        await driver.sleep(2000);
+      }
+      
       if (frames.length > 0) {
         console.log(`[Selenium] Detected Cloudflare challenge. Attempting to resolve...`);
+        const iframe = frames[0];
+        
         // Switch to frame
-        await driver.switchTo().frame(frames[0]);
+        await driver.switchTo().frame(iframe);
         
-        // Try to click checkbox using Actions for more realism
-        const checkbox = await driver.wait(until.elementLocated(By.css('input[type="checkbox"], #challenge-stage, body')), 8000);
-        
-        const actions = driver.actions({ bridge: true });
-        await actions.move({ origin: checkbox }).pause(500).press().pause(100).release().perform();
-        
-        console.log(`[Selenium] Performed physical click on challenge.`);
+        try {
+          // Try to click checkbox using Actions for more realism
+          console.log(`[Selenium] Waiting for checkbox inside iframe...`);
+          const checkbox = await driver.wait(until.elementLocated(By.css('input[type="checkbox"], #challenge-stage, #challenge-form, body')), 10000);
+          
+          const actions = driver.actions({ bridge: true });
+          // Move to element and click
+          await actions.move({ origin: checkbox }).pause(1000).press().pause(200).release().perform();
+          console.log(`[Selenium] Performed physical click on challenge element.`);
+        } catch (innerE) {
+          console.log(`[Selenium] Could not find specific checkbox, attempting generic click in frame center...`);
+          const actions = driver.actions({ bridge: true });
+          await actions.move({ x: 30, y: 30 }).pause(500).press().release().perform();
+        }
         
         // Switch back to main content
         await driver.switchTo().defaultContent();
-        await driver.sleep(8000); // Wait for redirect
+        console.log(`[Selenium] Waiting for redirect after click...`);
+        await driver.sleep(10000); 
+      } else {
+        console.log(`[Selenium] No Cloudflare iframe found on first check.`);
       }
     } catch (e) {
-      console.log(`[Selenium] Challenge resolution step skipped/failed: ${e.message}`);
+      console.log(`[Selenium] Challenge resolution step error: ${e.message}`);
       await driver.switchTo().defaultContent();
     }
 
