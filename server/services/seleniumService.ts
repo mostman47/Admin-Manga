@@ -14,11 +14,12 @@ export async function crawlWithSelenium(url: string) {
     options.addArguments("--disable-gpu");
     options.addArguments("--disable-extensions");
     options.addArguments("--disable-web-security");
+    options.addArguments("--ignore-certificate-errors");
+    options.addArguments("--allow-running-insecure-content");
     // Some sites detect headless chrome, try to spoof user agent
     options.addArguments("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
     options.addArguments("--disable-blink-features=AutomationControlled");
     options.excludeSwitches("enable-automation");
-    options.setUserPreferences({ "useAutomationExtension": false });
 
     driver = await new Builder()
       .forBrowser("chrome")
@@ -35,7 +36,7 @@ export async function crawlWithSelenium(url: string) {
 
     console.log(`[Selenium] Checking for challenges...`);
     // Wait for body to be present
-    await driver.wait(until.elementLocated(By.css("body")), 10000);
+    await driver.wait(until.elementLocated(By.css("body")), 15000);
 
     // Look for Cloudflare challenge
     try {
@@ -45,17 +46,20 @@ export async function crawlWithSelenium(url: string) {
         // Switch to frame
         await driver.switchTo().frame(frames[0]);
         
-        // Try to click checkbox
-        const checkbox = await driver.wait(until.elementLocated(By.css('input[type="checkbox"], #challenge-stage, body')), 5000);
-        await driver.executeScript("arguments[0].click();", checkbox);
-        console.log(`[Selenium] Clicked challenge inside frame.`);
+        // Try to click checkbox using Actions for more realism
+        const checkbox = await driver.wait(until.elementLocated(By.css('input[type="checkbox"], #challenge-stage, body')), 8000);
+        
+        const actions = driver.actions({ bridge: true });
+        await actions.move({ origin: checkbox }).pause(500).press().pause(100).release().perform();
+        
+        console.log(`[Selenium] Performed physical click on challenge.`);
         
         // Switch back to main content
         await driver.switchTo().defaultContent();
-        await driver.sleep(5000);
+        await driver.sleep(8000); // Wait for redirect
       }
     } catch (e) {
-      console.log(`[Selenium] Challenge resolution error or not found: ${e.message}`);
+      console.log(`[Selenium] Challenge resolution step skipped/failed: ${e.message}`);
       await driver.switchTo().defaultContent();
     }
 
@@ -64,7 +68,7 @@ export async function crawlWithSelenium(url: string) {
     let contentFound = false;
     for (const selector of contentSelectors) {
       try {
-        await driver.wait(until.elementLocated(By.css(selector)), 10000);
+        await driver.wait(until.elementLocated(By.css(selector)), 15000);
         contentFound = true;
         console.log(`[Selenium] Found content with selector: ${selector}`);
         break;
@@ -72,7 +76,11 @@ export async function crawlWithSelenium(url: string) {
     }
 
     if (!contentFound) {
-      console.log("[Selenium] Content selectors not found within 10s.");
+      console.log("[Selenium] Content selectors not found within 15s.");
+      const title = await driver.getTitle();
+      console.log(`[Selenium] Current Page Title: ${title}`);
+      const bodySnippet = await driver.executeScript("return document.body.innerText.substring(0, 200);");
+      console.log(`[Selenium] Page Text Snippet: ${bodySnippet}`);
     }
 
     // Scroll to load images
