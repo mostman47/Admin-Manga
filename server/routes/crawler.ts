@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { crawlGeneral, crawlNettruyen } from "../services/crawlerService.ts";
 import { crawlWithPlaywright } from "../services/playwrightService.ts";
+import { crawlWithSelenium } from "../services/seleniumService.ts";
 
 const router = Router();
 
@@ -39,6 +40,19 @@ router.post("/crawl-playwright", async (req, res) => {
     res.json(result);
   } catch (error: any) {
     console.error("[Playwright Error]", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post("/crawl-selenium", async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: "URL is required" });
+
+  try {
+    const result = await crawlWithSelenium(url);
+    res.json(result);
+  } catch (error: any) {
+    console.error("[Selenium Error]", error.message);
     res.status(500).json({ error: error.message });
   }
 });

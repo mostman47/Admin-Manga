@@ -14,6 +14,7 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
   const [htmlInput, setHtmlInput] = useState("");
   const [showManual, setShowManual] = useState(false);
   const [isAdvanced, setIsAdvanced] = useState(false);
+  const [useSelenium, setUseSelenium] = useState(false);
   const [headless, setHeadless] = useState(true);
   const [images, setImages] = useState<string[]>([]);
   const [debugImage, setDebugImage] = useState<string | null>(null);
@@ -28,11 +29,25 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
     setIsLoading(true);
     setError(null);
     setDebugImage(null);
-    setStatus(isAdvanced ? `Launching stealth browser (${headless ? "Headless" : "Visible"})...` : "Bypassing robot checker...");
+    
+    let statusMsg = "Bypassing robot checker...";
+    if (useSelenium) {
+      statusMsg = "Launching Selenium WebDriver...";
+    } else if (isAdvanced) {
+      statusMsg = `Launching stealth browser (${headless ? "Headless" : "Visible"})...`;
+    }
+    
+    setStatus(statusMsg);
     setImages([]);
 
     try {
-      const endpoint = isAdvanced ? "/api/crawl-playwright" : "/api/crawl-nettruyen";
+      let endpoint = "/api/crawl-nettruyen";
+      if (useSelenium) {
+        endpoint = "/api/crawl-selenium";
+      } else if (isAdvanced) {
+        endpoint = "/api/crawl-playwright";
+      }
+      
       const response = await axios.post(endpoint, { url, headless });
       
       if (response.data.debugImage) {
@@ -163,7 +178,22 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
             <div className="flex flex-col items-center gap-2">
               <button
                 type="button"
-                onClick={() => setIsAdvanced(!isAdvanced)}
+                onClick={() => {
+                  setUseSelenium(!useSelenium);
+                  if (!useSelenium) setIsAdvanced(false);
+                }}
+                className={`text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-2 transition-all ${useSelenium ? "text-blue-600 opacity-100" : "opacity-40 hover:opacity-100"}`}
+              >
+                <Code size={12} className={useSelenium ? "fill-current" : ""} /> {useSelenium ? "Selenium Mode ON" : "Use Selenium Mode"}
+              </button>
+            </div>
+            <div className="flex flex-col items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAdvanced(!isAdvanced);
+                  if (!isAdvanced) setUseSelenium(false);
+                }}
                 className={`text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-2 transition-all ${isAdvanced ? "text-green-600 opacity-100" : "opacity-40 hover:opacity-100"}`}
               >
                 <Zap size={12} className={isAdvanced ? "fill-current" : ""} /> {isAdvanced ? "Advanced Mode ON" : "Enable Advanced Mode"}
