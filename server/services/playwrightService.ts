@@ -1,3 +1,19 @@
+import path from "path";
+import os from "os";
+
+// Persistent profile — Cloudflare builds trust over multiple sessions via cookies.
+// A fresh context every run looks like a brand-new identity and spikes the bot score.
+const PROFILE_DIR = path.join(os.homedir(), ".admin-manga-chrome-profile");
+
+// Click positions to try in order. The goal is to focus the viewport before Tab.
+// Different positions handle cases where Tab first lands on a Privacy Policy link.
+const CLICK_POSITIONS = [
+  [183, 250],
+  [300, 150],
+  [400, 200],
+  [183, 310],
+] as const;
+
 export async function crawlWithPlaywright(
   url: string,
   headless: boolean = true,
@@ -9,30 +25,23 @@ export async function crawlWithPlaywright(
   };
 
   const { chromium } = await import("playwright-extra");
-  const { default: stealth } = await import("puppeteer-extra-plugin-stealth");
 
-  // @ts-ignore
-  chromium.use(stealth());
-
-  let browser;
+  let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
   try {
-    // Use real installed Chrome instead of Playwright's bundled Chromium.
-    // Cloudflare fingerprints the browser binary — Playwright's Chromium has
-    // automation markers that Turnstile detects even with the stealth plugin.
-    // Real Chrome passes those checks because it has the correct fingerprint.
-    log(`[Browser] Launching real Chrome (channel: chrome, headless: ${headless})`);
-    browser = await chromium.launch({
+    log(`[Browser] Launching persistent Chrome profile (headless: ${headless})`);
+
+    // Persistent context reuses the same Chrome user data dir across crawl runs.
+    context = await chromium.launchPersistentContext(PROFILE_DIR, {
       channel: "chrome",
-      headless: headless,
+      headless,
       args: [
         "--disable-blink-features=AutomationControlled",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-features=ChromeWhatsNewUI",
       ],
-    });
-
-    const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
       viewport: { width: 1920, height: 1080 },
       extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9,vi;q=0.8" },
       deviceScaleFactor: 1,
@@ -40,103 +49,80 @@ export async function crawlWithPlaywright(
       timezoneId: "America/New_York",
     });
 
-    const page = await context.newPage();
-    page.on("console", msg => console.log(`[Page Console] ${msg.text()}`));
+    // Patch the automation markers Cloudflare's JS challenge reads before any page load.
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      (window as any).chrome = {
+        runtime: {},
+        loadTimes: () => {},
+        csi: () => {},
+        app: {},
+      };
+      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+    });
 
-    // ── Navigate ──────────────────────────────────────────────────────────
-    // Fire navigation without awaiting — Cloudflare challenge pages never settle
-    log(`[Navigate] Firing navigation (non-blocking)...`);
+    const page = await context.newPage();
+
+    // ── Navigate ──────────────────────────────────────────────────────────────
+    // Don't await — Cloudflare challenge pages never reach networkidle.
+    log(`[Navigate] Navigating to ${url}`);
     page.goto(url, { timeout: 0 }).catch(() => {});
 
-    // Wait until we can see SOMETHING on the page (challenge text or manga content)
-    log(`[Navigate] Waiting for page to render (max 20s)...`);
-    await page.waitForSelector(
-      "h2.ch-title, .reading-detail, .page-chapter, #chapter_content, .box_doc, body",
-      { timeout: 20000 }
-    ).catch(() => log(`[Navigate] Selector wait timed out — continuing`));
+    // Wait for any visible DOM element to appear (challenge or real content).
+    await page
+      .waitForSelector("body", { timeout: 20000 })
+      .catch(() => log(`[Navigate] body wait timed out — continuing`));
 
-    await page.waitForTimeout(2000);
+    // Give Cloudflare 5s to fully initialize its JS challenge before we interact.
+    // Interacting too early means Tab lands in the wrong place.
+    log(`[Navigate] Waiting 5s for Cloudflare to initialize...`);
+    await page.waitForTimeout(5000);
+
     const initTitle = await page.title().catch(() => "?");
-    const initUrl   = page.url();
-    log(`[Navigate] Page loaded. Title: "${initTitle}" | URL: ${initUrl}`);
+    log(`[Navigate] Title: "${initTitle}"`);
 
-    // ── Detect whether Cloudflare challenge is active ─────────────────────
-    // Detection uses page title or the h2 text visible on the challenge page
+    // ── Challenge detection ────────────────────────────────────────────────────
     const isChallengePage = async (): Promise<boolean> => {
       try {
         const title = await page.title();
-        if (title.includes("Just a moment") || title.includes("Attention Required")) return true;
-        const h2 = await page.$("h2.ch-title");
-        if (h2) return true;
-        return false;
+        return title.includes("Just a moment") || title.includes("Attention Required");
       } catch {
         return false;
       }
     };
 
-    // ── Click the Turnstile checkbox via keyboard accessibility ─────────────
-    // Cloudflare must allow keyboard navigation (Tab/Space) for WCAG compliance.
-    // We click a mid-page position first to ensure focus is inside the viewport,
-    // then Tab into the iframe and Space to check the checkbox.
-    const tryClickCheckbox = async (scanNum: number) => {
-      log(`[Challenge] --- Attempt ${scanNum}: click → Tab → Space ---`);
+    // ── Bypass loop — up to 4 attempts, one per click position ────────────────
+    // Proven timing from working skill:
+    //   click → wait 2s → Tab → wait 1s → Space → wait 5s → check title
+    const MAX_ATTEMPTS = 4;
 
-      await page.bringToFront();
-      await page.waitForTimeout(500);
-
-      // Click mid-page to give the browser a focused window (Tab won't work otherwise)
-      const clickTargets = [[300, 150], [183, 250], [500, 300]] as const;
-      const [cx, cy] = clickTargets[scanNum % clickTargets.length];
-      log(`[Challenge] Clicking [${cx}, ${cy}] to focus page...`);
-      await page.mouse.click(cx, cy);
-      await page.waitForTimeout(2000); // let Cloudflare fully load
-
-      // Tab into the Turnstile iframe — Cloudflare places the checkbox as the
-      // first focusable element inside its iframe, so one Tab usually lands on it
-      log(`[Challenge] Pressing Tab to focus Turnstile checkbox...`);
-      await page.keyboard.press("Tab");
-      await page.waitForTimeout(500);
-
-      // Space activates the focused checkbox
-      log(`[Challenge] Pressing Space to check the box...`);
-      await page.keyboard.press("Space");
-      log(`[Challenge] Space sent — waiting for Cloudflare to verify...`);
-    };
-
-    // ── Scan loop: check every 5s if "Performing security verification" is present ──
-    const SCAN_INTERVAL_MS = 3000;
-    const MAX_SCANS = 40; // ~2 minutes max
-
-    log(`[Challenge] Starting scan loop (interval: 3s, max: ${MAX_SCANS} scans)...`);
-
-    for (let scan = 1; scan <= MAX_SCANS; scan++) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const challenged = await isChallengePage();
-      const pageTitle  = await page.title().catch(() => "?");
-      log(`[Challenge] Scan ${scan}/${MAX_SCANS} — title: "${pageTitle}" — challenged: ${challenged}`);
-
       if (!challenged) {
-        log(`[Challenge] No challenge detected — page is clean!`);
+        log(`[Challenge] No challenge — page is clean!`);
         break;
       }
 
-      log(`[Challenge] Challenge is active — trying to click the checkbox...`);
-      await tryClickCheckbox(scan);
+      const [cx, cy] = CLICK_POSITIONS[(attempt - 1) % CLICK_POSITIONS.length];
+      log(`[Challenge] Attempt ${attempt}/${MAX_ATTEMPTS} — click [${cx},${cy}] → Tab → Space`);
 
-      if (scan < MAX_SCANS) {
-        log(`[Challenge] Waiting 3s before next scan...`);
-        await page.waitForTimeout(SCAN_INTERVAL_MS);
+      await page.bringToFront();
+      await page.mouse.click(cx, cy);
+      await page.waitForTimeout(2000);
 
-        // Quick check mid-wait to exit early if challenge resolved
-        const resolvedEarly = !(await isChallengePage());
-        if (resolvedEarly) {
-          log(`[Challenge] Challenge resolved during wait! Proceeding.`);
-          break;
-        }
-      }
+      await page.keyboard.press("Tab");
+      await page.waitForTimeout(1000);
+
+      await page.keyboard.press("Space");
+      log(`[Challenge] Space sent — waiting 5s for Cloudflare to verify...`);
+      await page.waitForTimeout(5000);
+
+      const title = await page.title().catch(() => "?");
+      log(`[Challenge] Title after attempt ${attempt}: "${title}"`);
     }
 
-    // ── Wait for manga content ────────────────────────────────────────────
-    log(`[Content] Waiting for manga content selectors...`);
+    // ── Wait for manga content ────────────────────────────────────────────────
+    log(`[Content] Waiting for manga content...`);
     const contentSelectors = [".reading-detail", ".page-chapter", "#chapter_content", ".box_doc"];
     try {
       await Promise.race([
@@ -148,8 +134,8 @@ export async function crawlWithPlaywright(
       log(`[Content] No content selector matched — proceeding anyway`);
     }
 
-    // ── Force lazy images ─────────────────────────────────────────────────
-    log(`[Images] Forcing lazy-loaded images to reveal...`);
+    // ── Force lazy images ─────────────────────────────────────────────────────
+    log(`[Images] Forcing lazy-loaded images...`);
     await page.evaluate(`() => {
       document.querySelectorAll("img").forEach(img => {
         const s = img.getAttribute("data-src") || img.getAttribute("data-original") || img.getAttribute("data-lazy-src");
@@ -163,8 +149,13 @@ export async function crawlWithPlaywright(
       for (let i = 0; i < 20; i++) { window.scrollBy(0, 800); await d(500); }
     }`);
 
-    // ── Screenshot each manga image element ───────────────────────────────
-    const imageSelectors = [".reading-detail img", ".page-chapter img", "#chapter_content img", ".box_doc img"];
+    // ── Screenshot each manga image element ───────────────────────────────────
+    const imageSelectors = [
+      ".reading-detail img",
+      ".page-chapter img",
+      "#chapter_content img",
+      ".box_doc img",
+    ];
     let images: string[] = [];
 
     log(`[Images] Searching for manga image elements...`);
@@ -182,7 +173,7 @@ export async function crawlWithPlaywright(
             if ((i + 1) % 5 === 0 || i === elements.length - 1) {
               log(`[Images] Captured ${i + 1}/${elements.length}...`);
             }
-          } catch (e) {}
+          } catch (_) {}
         }
         break;
       }
@@ -191,7 +182,7 @@ export async function crawlWithPlaywright(
     if (images.length === 0) {
       log(`[Images] No images found — saving debug screenshot`);
       const dbgBuf = await page.screenshot({ fullPage: true, type: "jpeg", quality: 50 });
-      await browser.close();
+      await context.close();
       log(`[Done] Browser closed.`);
       return {
         images: [],
@@ -201,12 +192,12 @@ export async function crawlWithPlaywright(
     }
 
     log(`[Done] Captured ${images.length} images. Closing browser.`);
-    await browser.close();
+    await context.close();
     return { images };
 
   } catch (error: any) {
     log(`[Error] ${error.message}`);
-    if (browser) await browser.close();
+    if (context) await context.close();
     throw error;
   }
 }
