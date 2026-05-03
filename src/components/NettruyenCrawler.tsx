@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { Search, Image as ImageIcon, Loader2, ExternalLink, ShieldAlert, Zap, Code, BrainCircuit } from "lucide-react";
+import React, { useState, useRef, useEffect } from "react";
+import { Search, Image as ImageIcon, Loader2, ExternalLink, ShieldAlert, Zap, Code, BrainCircuit, Terminal } from "lucide-react";
 import axios from "axios";
 import { GoogleGenAI, Type } from "@google/genai";
 import { TokenUsage } from "../types";
@@ -9,18 +9,46 @@ interface NettruyenCrawlerProps {
   onUsageUpdate: (usage: TokenUsage) => void;
 }
 
+const LOG_COLORS: Record<string, string> = {
+  "[Browser]":   "text-blue-400",
+  "[Navigate]":  "text-yellow-400",
+  "[Challenge]": "text-orange-400",
+  "[Content]":   "text-cyan-400",
+  "[Images]":    "text-green-400",
+  "[Done]":      "text-emerald-400",
+  "[Error]":     "text-red-400",
+  "[Page":       "text-white/40",
+};
+
+function getLogColor(msg: string): string {
+  for (const [prefix, cls] of Object.entries(LOG_COLORS)) {
+    if (msg.startsWith(prefix)) return cls;
+  }
+  return "text-white/70";
+}
+
 export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImage, onUsageUpdate }) => {
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState("https://nettruyenviet10.com/");
   const [htmlInput, setHtmlInput] = useState("");
   const [showManual, setShowManual] = useState(false);
-  const [isAdvanced, setIsAdvanced] = useState(false);
+  const [isAdvanced, setIsAdvanced] = useState(true);
   const [useSelenium, setUseSelenium] = useState(false);
-  const [headless, setHeadless] = useState(true);
+  const [headless, setHeadless] = useState(false);
   const [images, setImages] = useState<string[]>([]);
   const [debugImage, setDebugImage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  const logPanelRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll log panel to bottom on new entries
+  useEffect(() => {
+    if (logPanelRef.current) {
+      logPanelRef.current.scrollTop = logPanelRef.current.scrollHeight;
+    }
+  }, [logs]);
 
   const handleCrawl = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,41 +57,98 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
     setIsLoading(true);
     setError(null);
     setDebugImage(null);
-    
-    let statusMsg = "Bypassing robot checker...";
-    if (useSelenium) {
-      statusMsg = "Launching Selenium WebDriver...";
-    } else if (isAdvanced) {
-      statusMsg = `Launching stealth browser (${headless ? "Headless" : "Visible"})...`;
-    }
-    
-    setStatus(statusMsg);
     setImages([]);
+    setLogs([]);
 
-    try {
-      let endpoint = "/api/crawl-nettruyen";
-      if (useSelenium) {
-        endpoint = "/api/crawl-selenium";
-      } else if (isAdvanced) {
-        endpoint = "/api/crawl-playwright";
+    if (useSelenium) {
+      setStatus("Launching Selenium WebDriver...");
+      try {
+        const response = await axios.post("/api/crawl-selenium", { url, headless });
+        if (response.data.debugImage) setDebugImage(response.data.debugImage);
+        setImages(response.data.images);
+        setStatus(null);
+        if (response.data.images.length === 0) {
+          setError(response.data.error || "Selenium couldn't find images.");
+        }
+      } catch (err: any) {
+        setError(err.response?.data?.error || "Selenium failed.");
+        setStatus(null);
+      } finally {
+        setIsLoading(false);
       }
-      
-      const response = await axios.post(endpoint, { url, headless });
-      
-      if (response.data.debugImage) {
-        setDebugImage(response.data.debugImage);
-      }
+    } else if (isAdvanced) {
+      // Playwright path: stream SSE logs from server
+      setStatus("Connecting to stealth browser...");
+      try {
+        const response = await fetch("/api/crawl-playwright", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, headless }),
+        });
 
-      setImages(response.data.images);
-      setStatus(null);
-      if (response.data.images.length === 0) {
-        setError(response.data.error || (isAdvanced ? "Advanced crawler couldn't find images. Try 'AI Extraction' mode." : "No images found. Try 'Advanced Mode' or 'AI Extraction'."));
+        if (!response.ok || !response.body) {
+          throw new Error(`Server error: ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() || "";
+
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.type === "log") {
+                // Skip raw browser console noise
+                if (data.message.startsWith("[Page Console]")) continue;
+                setLogs(prev => [...prev, data.message]);
+                setStatus(data.message);
+              } else if (data.type === "result") {
+                if (data.debugImage) setDebugImage(data.debugImage);
+                setImages(data.images || []);
+                if (!data.images?.length) {
+                  setError(data.error || "Advanced crawler couldn't find images. Try AI Extraction.");
+                }
+                setStatus(null);
+              } else if (data.type === "error") {
+                setError(data.message);
+                setStatus(null);
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (err: any) {
+        setError(err.message || "Stream connection failed.");
+        setStatus(null);
+      } finally {
+        setIsLoading(false);
       }
-    } catch (err: any) {
-      setError(err.response?.data?.error || "Failed to bypass robot checker. Nettruyen has strong protection.");
-      setStatus(null);
-    } finally {
-      setIsLoading(false);
+    } else {
+      // Basic bypass path: plain axios
+      setStatus("Bypassing robot checker...");
+      try {
+        const response = await axios.post("/api/crawl-nettruyen", { url });
+        if (response.data.debugImage) setDebugImage(response.data.debugImage);
+        setImages(response.data.images);
+        setStatus(null);
+        if (response.data.images.length === 0) {
+          setError(response.data.error || "No images found. Try Advanced Mode or AI Extraction.");
+        }
+      } catch (err: any) {
+        setError(err.response?.data?.error || "Failed to bypass robot checker. Nettruyen has strong protection.");
+        setStatus(null);
+      } finally {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -72,12 +157,11 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
     setIsLoading(true);
     setError(null);
     setStatus("AI is analyzing HTML...");
-    
+
     try {
-      // We'll call Gemini directly from frontend as per guidelines
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
       const model = "gemini-3.1-flash-lite-preview";
-      
+
       const prompt = `
         Analyze the provided HTML source code from a manga website.
         Extract ALL image URLs that belong to the manga chapter content.
@@ -90,7 +174,7 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
         model,
         contents: [
           { text: prompt },
-          { text: `HTML SOURCE:\n${htmlInput.substring(0, 50000)}` } // Limit to 50k chars for safety
+          { text: `HTML SOURCE:\n${htmlInput.substring(0, 50000)}` }
         ],
         config: {
           responseMimeType: "application/json",
@@ -127,11 +211,10 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
   const handleImageSelect = async (imgUrl: string) => {
     try {
       setStatus("Fetching image via proxy...");
-      // Use the exact chapter URL as the referer, as some sites check for specific paths
       const refererUrl = url || "https://nettruyenviet10.com/";
       const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(imgUrl)}&referer=${encodeURIComponent(refererUrl)}`;
-      const response = await axios.get(proxyUrl, { responseType: 'blob' });
-      
+      const response = await axios.get(proxyUrl, { responseType: "blob" });
+
       const reader = new FileReader();
       reader.onloadend = () => {
         onSelectImage(reader.result as string);
@@ -156,15 +239,15 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
 
         <form onSubmit={handleCrawl} className="flex flex-col gap-4">
           <div className="flex gap-2">
-            <input 
-              type="url" 
+            <input
+              type="url"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://nettruyenviet10.com/truyen-tranh/..."
               className="flex-1 px-6 py-4 bg-[#F5F5F0] rounded-2xl border-none focus:ring-2 focus:ring-[#141414] text-sm font-bold"
               required
             />
-            <button 
+            <button
               type="submit"
               disabled={isLoading}
               className="px-8 py-4 bg-[#141414] text-white rounded-2xl font-bold uppercase tracking-widest text-xs hover:scale-105 transition-transform disabled:opacity-50 disabled:scale-100 flex items-center gap-2 shadow-lg"
@@ -196,7 +279,8 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
                 }}
                 className={`text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-2 transition-all ${isAdvanced ? "text-green-600 opacity-100" : "opacity-40 hover:opacity-100"}`}
               >
-                <Zap size={12} className={isAdvanced ? "fill-current" : ""} /> {isAdvanced ? "Advanced Mode ON" : "Enable Advanced Mode"}
+                <Zap size={12} className={isAdvanced ? "fill-current" : ""} />
+                {isAdvanced ? "Advanced Mode ON" : "Enable Advanced Mode"}
               </button>
               {isAdvanced && (
                 <button
@@ -217,6 +301,36 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
             </button>
           </div>
 
+          {/* Real-time Log Panel — shown during/after advanced mode crawl */}
+          {isAdvanced && logs.length > 0 && (
+            <div className="text-left animate-in fade-in duration-300">
+              <div className="flex items-center gap-2 mb-2 px-1">
+                <Terminal size={11} className="opacity-40" />
+                <span className="text-[9px] font-bold uppercase tracking-[0.2em] opacity-40">Browser Log</span>
+                <span className="ml-auto text-[9px] font-mono opacity-30">{logs.length} events</span>
+              </div>
+              <div
+                ref={logPanelRef}
+                className="bg-[#0D0D0D] rounded-2xl p-4 max-h-52 overflow-y-auto space-y-1 border border-white/5 scrollbar-thin"
+              >
+                {logs.map((msg, idx) => (
+                  <div key={idx} className="flex gap-3 items-start font-mono text-[10px] leading-relaxed">
+                    <span className="text-white/20 shrink-0 select-none tabular-nums">
+                      {String(idx + 1).padStart(2, "0")}
+                    </span>
+                    <span className={`${getLogColor(msg)} break-all`}>{msg}</span>
+                  </div>
+                ))}
+                {isLoading && (
+                  <div className="flex gap-3 items-center font-mono text-[10px]">
+                    <span className="text-white/20 shrink-0">··</span>
+                    <span className="text-white/30 animate-pulse">waiting...</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {showManual && (
             <div className="space-y-4 animate-in fade-in zoom-in-95 duration-300">
               <div className="p-4 bg-[#141414] rounded-2xl text-white text-left">
@@ -227,7 +341,7 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
                 <p className="text-[10px] opacity-60 mb-4 leading-relaxed">
                   If the direct bypass fails, open the manga page in your browser, right-click &gt; "View Page Source", copy everything (Ctrl+A, Ctrl+C), and paste it below. AI will find the hidden image URLs for you.
                 </p>
-                
+
                 {htmlInput && (
                   <div className="mb-4 p-3 bg-white/5 rounded-xl border border-white/10 flex justify-between items-center">
                     <span className="text-[10px] uppercase font-bold opacity-50">Estimated AI Cost</span>
@@ -255,8 +369,8 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
               </div>
             </div>
           )}
-          
-          {status && (
+
+          {status && !isAdvanced && (
             <div className="flex items-center justify-center gap-2 text-[10px] font-bold uppercase tracking-widest text-[#141414]/40 animate-pulse">
               <Loader2 size={12} className="animate-spin" />
               {status}
@@ -272,7 +386,7 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
             </div>
             <p className="text-red-500 text-xs font-bold uppercase tracking-wider leading-relaxed">{error}</p>
             <p className="text-[10px] text-red-400 mt-2 uppercase font-bold">Try refreshing the page or using a different chapter link.</p>
-            
+
             {debugImage && (
               <div className="mt-4 p-2 bg-white rounded-xl border border-red-200">
                 <p className="text-[8px] uppercase font-bold opacity-40 mb-2">Debug Screenshot (What the crawler sees):</p>
@@ -286,14 +400,14 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
       {images.length > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
           {images.map((img, idx) => (
-            <div 
-              key={idx} 
+            <div
+              key={idx}
               className="group relative bg-white rounded-2xl overflow-hidden border border-[#141414]/10 shadow-lg hover:shadow-2xl transition-all cursor-pointer"
               onClick={() => handleImageSelect(img)}
             >
-              <img 
-                src={img} 
-                alt={`Scrawled ${idx}`} 
+              <img
+                src={img}
+                alt={`Scrawled ${idx}`}
                 className="w-full h-48 object-cover group-hover:scale-110 transition-transform duration-500"
                 referrerPolicy="no-referrer"
               />
@@ -303,9 +417,9 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
                   <p className="text-[10px] font-bold uppercase tracking-widest">Translate This</p>
                 </div>
               </div>
-              <a 
-                href={img} 
-                target="_blank" 
+              <a
+                href={img}
+                target="_blank"
                 rel="noopener noreferrer"
                 className="absolute top-2 right-2 p-2 bg-white/80 backdrop-blur rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-white"
                 onClick={(e) => e.stopPropagation()}

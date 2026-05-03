@@ -1,168 +1,198 @@
-export async function crawlWithPlaywright(url: string, headless: boolean = true) {
+export async function crawlWithPlaywright(
+  url: string,
+  headless: boolean = true,
+  onLog: (msg: string) => void = () => {}
+) {
+  const log = (msg: string) => {
+    console.log(msg);
+    onLog(msg);
+  };
+
   const { chromium } = await import("playwright-extra");
   const { default: stealth } = await import("puppeteer-extra-plugin-stealth");
-  
+
   // @ts-ignore
   chromium.use(stealth());
 
   let browser;
   try {
-    console.log(`[Playwright] Launching stealth browser (headless: ${headless}) for: ${url}`);
-    browser = await chromium.launch({ 
+    // Use real installed Chrome instead of Playwright's bundled Chromium.
+    // Cloudflare fingerprints the browser binary — Playwright's Chromium has
+    // automation markers that Turnstile detects even with the stealth plugin.
+    // Real Chrome passes those checks because it has the correct fingerprint.
+    log(`[Browser] Launching real Chrome (channel: chrome, headless: ${headless})`);
+    browser = await chromium.launch({
+      channel: "chrome",
       headless: headless,
       args: [
-        "--disable-web-security", 
-        "--disable-features=IsolateOrigins,site-per-process",
-      ]
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+      ],
     });
-    
+
     const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
       viewport: { width: 1920, height: 1080 },
-      extraHTTPHeaders: {
-        "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-      },
+      extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9,vi;q=0.8" },
       deviceScaleFactor: 1,
+      locale: "en-US",
+      timezoneId: "America/New_York",
     });
-    
+
     const page = await context.newPage();
-    page.on("console", msg => console.log(`[Browser Console] ${msg.text()}`));
-    
-    console.log(`[Playwright] Navigating to ${url}...`);
-    await page.goto(url, { waitUntil: "networkidle", timeout: 90000 }).catch(e => {
-      console.log(`[Playwright] Initial navigation timeout (continuing): ${e.message}`);
-    });
+    page.on("console", msg => console.log(`[Page Console] ${msg.text()}`));
 
-    console.log(`[Playwright] Checking for challenges...`);
-    const challengeSelectors = ["iframe[src*='challenges.cloudflare.com']", "#challenge-form", "#cf-challenge"];
-    
-    for (let attempt = 0; attempt < 3; attempt++) {
-      let foundChallenge = false;
-      
-      // 1. Try Frame-level interaction (More precise)
-      const frames = page.frames();
-      const cfFrame = frames.find(f => f.url().includes('challenges.cloudflare.com'));
-      
-      if (cfFrame) {
-        foundChallenge = true;
-        console.log(`[Playwright] Found Cloudflare frame. Attempting internal click (Attempt ${attempt + 1})...`);
-        try {
-          // Try to find the checkbox or the stage container
-          const selectors = ['input[type="checkbox"]', '#challenge-stage', 'body'];
-          for (const s of selectors) {
-            const el = await cfFrame.$(s);
-            if (el) {
-              await el.click({ delay: 100 + Math.random() * 200 }).catch(() => {});
-              console.log(`[Playwright] Clicked ${s} inside frame.`);
-              break;
-            }
-          }
-          await page.waitForTimeout(5000);
-        } catch (e) {
-          console.log(`[Playwright] Frame click error: ${e.message}`);
-        }
+    // ── Navigate ──────────────────────────────────────────────────────────
+    // Fire navigation without awaiting — Cloudflare challenge pages never settle
+    log(`[Navigate] Firing navigation (non-blocking)...`);
+    page.goto(url, { timeout: 0 }).catch(() => {});
+
+    // Wait until we can see SOMETHING on the page (challenge text or manga content)
+    log(`[Navigate] Waiting for page to render (max 20s)...`);
+    await page.waitForSelector(
+      "h2.ch-title, .reading-detail, .page-chapter, #chapter_content, .box_doc, body",
+      { timeout: 20000 }
+    ).catch(() => log(`[Navigate] Selector wait timed out — continuing`));
+
+    await page.waitForTimeout(2000);
+    const initTitle = await page.title().catch(() => "?");
+    const initUrl   = page.url();
+    log(`[Navigate] Page loaded. Title: "${initTitle}" | URL: ${initUrl}`);
+
+    // ── Detect whether Cloudflare challenge is active ─────────────────────
+    // Detection uses page title or the h2 text visible on the challenge page
+    const isChallengePage = async (): Promise<boolean> => {
+      try {
+        const title = await page.title();
+        if (title.includes("Just a moment") || title.includes("Attention Required")) return true;
+        const h2 = await page.$("h2.ch-title");
+        if (h2) return true;
+        return false;
+      } catch {
+        return false;
       }
+    };
 
-      // 2. Fallback to Coordinate-level interaction (if frame click didn't resolve it)
-      if (foundChallenge) {
-        for (const sel of challengeSelectors) {
-          const challengeElement = await page.$(sel);
-          if (challengeElement) {
-            console.log(`[Playwright] Challenge ${sel} still visible. Trying coordinate click...`);
-            try {
-              const box = await challengeElement.boundingBox();
-              if (box) {
-                await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 15 });
-                await page.mouse.click(box.x + 35 + Math.random() * 5, box.y + box.height / 2, { delay: 150 });
-                await page.waitForTimeout(5000);
-              }
-            } catch (e) {}
-          }
-        }
-      }
+    // ── Click the Turnstile checkbox (multiple methods) ───────────────────
+    const tryClickCheckbox = async (scanNum: number) => {
+      log(`[Challenge] --- Attempt ${scanNum}: bringToFront + Tab-until-input + Enter ---`);
 
-      if (!foundChallenge) break;
-      
-      // Check if we navigated away or content appeared
-      const hasContent = await page.$(".reading-detail, .page-chapter, #chapter_content").catch(() => null);
-      if (hasContent) {
-        console.log(`[Playwright] Content detected! Challenge resolved.`);
+      await page.bringToFront();
+      log(`[Challenge] Window brought to front`);
+      await page.waitForTimeout(500);
+
+      // Cloudflare Turnstile uses behavioral analysis (mouse history, timing, etc.)
+      // Automated Tab+Space triggers the checkbox but fails the behavioral check.
+      // Since the browser is visible, prompt the user to solve it manually — the
+      // bot then waits and takes over automatically once the challenge is cleared.
+      log(`[Challenge] ⚠️  Please click the "Verify you are human" checkbox in the browser window.`);
+      log(`[Challenge] Waiting for you to solve the challenge (up to 2 minutes)...`);
+    };
+
+    // ── Scan loop: check every 5s if "Performing security verification" is present ──
+    const SCAN_INTERVAL_MS = 3000;
+    const MAX_SCANS = 40; // ~2 minutes max
+
+    log(`[Challenge] Starting scan loop (interval: 3s, max: ${MAX_SCANS} scans)...`);
+
+    for (let scan = 1; scan <= MAX_SCANS; scan++) {
+      const challenged = await isChallengePage();
+      const pageTitle  = await page.title().catch(() => "?");
+      log(`[Challenge] Scan ${scan}/${MAX_SCANS} — title: "${pageTitle}" — challenged: ${challenged}`);
+
+      if (!challenged) {
+        log(`[Challenge] No challenge detected — page is clean!`);
         break;
+      }
+
+      log(`[Challenge] Challenge is active — trying to click the checkbox...`);
+      await tryClickCheckbox(scan);
+
+      if (scan < MAX_SCANS) {
+        log(`[Challenge] Waiting 3s before next scan...`);
+        await page.waitForTimeout(SCAN_INTERVAL_MS);
+
+        // Quick check mid-wait to exit early if challenge resolved
+        const resolvedEarly = !(await isChallengePage());
+        if (resolvedEarly) {
+          log(`[Challenge] Challenge resolved during wait! Proceeding.`);
+          break;
+        }
       }
     }
 
-    console.log(`[Playwright] Waiting for content or navigation...`);
-    // Wait for the specific content selectors we expect
+    // ── Wait for manga content ────────────────────────────────────────────
+    log(`[Content] Waiting for manga content selectors...`);
     const contentSelectors = [".reading-detail", ".page-chapter", "#chapter_content", ".box_doc"];
     try {
       await Promise.race([
         Promise.any(contentSelectors.map(s => page.waitForSelector(s, { timeout: 30000 }))),
-        page.waitForNavigation({ waitUntil: "networkidle", timeout: 30000 })
+        page.waitForNavigation({ waitUntil: "networkidle", timeout: 30000 }),
       ]);
-    } catch (e) {
-      console.log("[Playwright] Content not found or no navigation after challenge resolution.");
+      log(`[Content] Content container found!`);
+    } catch {
+      log(`[Content] No content selector matched — proceeding anyway`);
     }
 
+    // ── Force lazy images ─────────────────────────────────────────────────
+    log(`[Images] Forcing lazy-loaded images to reveal...`);
     await page.evaluate(`() => {
-      const imgs = document.querySelectorAll("img");
-      imgs.forEach(img => {
-        const dataSrc = img.getAttribute("data-src") || img.getAttribute("data-original") || img.getAttribute("data-lazy-src");
-        if (dataSrc) {
-          img.setAttribute("src", dataSrc);
-          img.style.display = "block";
-          img.style.minHeight = "500px";
-        }
+      document.querySelectorAll("img").forEach(img => {
+        const s = img.getAttribute("data-src") || img.getAttribute("data-original") || img.getAttribute("data-lazy-src");
+        if (s) { img.src = s; img.style.display = "block"; img.style.minHeight = "500px"; }
       });
     }`);
 
-    console.log(`[Playwright] Scrolling to render images...`);
+    log(`[Images] Scrolling to render all images...`);
     await page.evaluate(`async () => {
-      const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-      for (let i = 0; i < 20; i++) {
-        window.scrollBy(0, 800);
-        await delay(500);
-      }
+      const d = ms => new Promise(r => setTimeout(r, ms));
+      for (let i = 0; i < 20; i++) { window.scrollBy(0, 800); await d(500); }
     }`);
 
+    // ── Screenshot each manga image element ───────────────────────────────
     const imageSelectors = [".reading-detail img", ".page-chapter img", "#chapter_content img", ".box_doc img"];
     let images: string[] = [];
 
-    console.log(`[Playwright] Capturing screenshots of images...`);
+    log(`[Images] Searching for manga image elements...`);
     for (const selector of imageSelectors) {
       const elements = await page.$$(selector);
       if (elements.length > 0) {
-        console.log(`[Playwright] Found ${elements.length} images with selector: ${selector}`);
+        log(`[Images] Found ${elements.length} images via "${selector}"`);
         for (let i = 0; i < elements.length; i++) {
           try {
             const el = elements[i];
             await el.scrollIntoViewIfNeeded();
             await page.waitForTimeout(200);
-            const buffer = await el.screenshot({ type: "jpeg", quality: 85 });
-            images.push(`data:image/jpeg;base64,${buffer.toString("base64")}`);
-            if ((i + 1) % 10 === 0) console.log(`[Playwright] Captured ${i + 1}/${elements.length}...`);
+            const buf = await el.screenshot({ type: "jpeg", quality: 85 });
+            images.push(`data:image/jpeg;base64,${buf.toString("base64")}`);
+            if ((i + 1) % 5 === 0 || i === elements.length - 1) {
+              log(`[Images] Captured ${i + 1}/${elements.length}...`);
+            }
           } catch (e) {}
         }
-        break; 
+        break;
       }
     }
 
     if (images.length === 0) {
-      console.log(`[Playwright] No images found. Taking debug screenshot...`);
-      const debugBuffer = await page.screenshot({ fullPage: true, type: "jpeg", quality: 50 });
-      const debugBase64 = `data:image/jpeg;base64,${debugBuffer.toString("base64")}`;
+      log(`[Images] No images found — saving debug screenshot`);
+      const dbgBuf = await page.screenshot({ fullPage: true, type: "jpeg", quality: 50 });
       await browser.close();
-      return { 
-        images: [], 
-        debugImage: debugBase64,
-        error: "No images found. Check the debug screenshot to see if the page is blocked." 
+      log(`[Done] Browser closed.`);
+      return {
+        images: [],
+        debugImage: `data:image/jpeg;base64,${dbgBuf.toString("base64")}`,
+        error: "No images found. Check the debug screenshot.",
       };
     }
 
-    console.log(`[Playwright] Successfully captured ${images.length} images.`);
+    log(`[Done] Captured ${images.length} images. Closing browser.`);
     await browser.close();
     return { images };
+
   } catch (error: any) {
-    console.error("[Playwright Error]", error.message);
+    log(`[Error] ${error.message}`);
     if (browser) await browser.close();
     throw error;
   }

@@ -35,12 +35,26 @@ router.post("/crawl-playwright", async (req, res) => {
   const { url, headless = true } = req.body;
   if (!url) return res.status(400).json({ error: "URL is required" });
 
+  // Stream logs back to the client as Server-Sent Events
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const send = (data: object) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
   try {
-    const result = await crawlWithPlaywright(url, headless);
-    res.json(result);
+    const result = await crawlWithPlaywright(url, headless, (msg) => {
+      send({ type: "log", message: msg });
+    });
+    send({ type: "result", ...result });
   } catch (error: any) {
     console.error("[Playwright Error]", error.message);
-    res.status(500).json({ error: error.message });
+    send({ type: "error", message: error.message });
+  } finally {
+    res.end();
   }
 });
 
