@@ -74,20 +74,33 @@ export async function crawlWithPlaywright(
       }
     };
 
-    // ── Click the Turnstile checkbox (multiple methods) ───────────────────
+    // ── Click the Turnstile checkbox via keyboard accessibility ─────────────
+    // Cloudflare must allow keyboard navigation (Tab/Space) for WCAG compliance.
+    // We click a mid-page position first to ensure focus is inside the viewport,
+    // then Tab into the iframe and Space to check the checkbox.
     const tryClickCheckbox = async (scanNum: number) => {
-      log(`[Challenge] --- Attempt ${scanNum}: bringToFront + Tab-until-input + Enter ---`);
+      log(`[Challenge] --- Attempt ${scanNum}: click → Tab → Space ---`);
 
       await page.bringToFront();
-      log(`[Challenge] Window brought to front`);
       await page.waitForTimeout(500);
 
-      // Cloudflare Turnstile uses behavioral analysis (mouse history, timing, etc.)
-      // Automated Tab+Space triggers the checkbox but fails the behavioral check.
-      // Since the browser is visible, prompt the user to solve it manually — the
-      // bot then waits and takes over automatically once the challenge is cleared.
-      log(`[Challenge] ⚠️  Please click the "Verify you are human" checkbox in the browser window.`);
-      log(`[Challenge] Waiting for you to solve the challenge (up to 2 minutes)...`);
+      // Click mid-page to give the browser a focused window (Tab won't work otherwise)
+      const clickTargets = [[300, 150], [183, 250], [500, 300]] as const;
+      const [cx, cy] = clickTargets[scanNum % clickTargets.length];
+      log(`[Challenge] Clicking [${cx}, ${cy}] to focus page...`);
+      await page.mouse.click(cx, cy);
+      await page.waitForTimeout(2000); // let Cloudflare fully load
+
+      // Tab into the Turnstile iframe — Cloudflare places the checkbox as the
+      // first focusable element inside its iframe, so one Tab usually lands on it
+      log(`[Challenge] Pressing Tab to focus Turnstile checkbox...`);
+      await page.keyboard.press("Tab");
+      await page.waitForTimeout(500);
+
+      // Space activates the focused checkbox
+      log(`[Challenge] Pressing Space to check the box...`);
+      await page.keyboard.press("Space");
+      log(`[Challenge] Space sent — waiting for Cloudflare to verify...`);
     };
 
     // ── Scan loop: check every 5s if "Performing security verification" is present ──
