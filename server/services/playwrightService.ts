@@ -34,6 +34,10 @@ export async function crawlWithPlaywright(
     context = await chromium.launchPersistentContext(PROFILE_DIR, {
       channel: "chrome",
       headless,
+      // Playwright injects --enable-automation by default — this is what causes
+      // the "Chrome is being controlled by automated test software" banner and
+      // is a primary bot signal Cloudflare reads. Remove it explicitly.
+      ignoreDefaultArgs: ["--enable-automation"],
       args: [
         "--disable-blink-features=AutomationControlled",
         "--no-first-run",
