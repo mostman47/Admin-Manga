@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Search, Image as ImageIcon, Loader2, ExternalLink, ShieldAlert, Zap, Code, BrainCircuit, Terminal } from "lucide-react";
+import { Search, Image as ImageIcon, Loader2, ExternalLink, ShieldAlert, Zap, Code, BrainCircuit, Terminal, RefreshCw } from "lucide-react";
 import axios from "axios";
 import { GoogleGenAI, Type } from "@google/genai";
 import { TokenUsage } from "../types";
@@ -27,8 +27,46 @@ function getLogColor(msg: string): string {
   return "text-white/70";
 }
 
+function LaunchChromeButton() {
+  const [state, setState] = useState<"idle" | "launching" | "done" | "error">("idle");
+  const [msg, setMsg] = useState("");
+
+  const launch = async () => {
+    setState("launching");
+    try {
+      await axios.post("/api/launch-chrome");
+      setState("done");
+      setMsg("Chrome launched with debug port — click Advanced to crawl.");
+    } catch (err: any) {
+      setState("error");
+      setMsg(err.response?.data?.error || "Failed to launch Chrome.");
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={launch}
+        disabled={state === "launching"}
+        className={`w-full py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest flex items-center justify-center gap-2 transition-all ${
+          state === "done"  ? "bg-emerald-500 text-white" :
+          state === "error" ? "bg-red-500 text-white" :
+          "bg-white text-[#141414] hover:bg-white/90"
+        } disabled:opacity-50`}
+      >
+        {state === "launching" && <Loader2 size={11} className="animate-spin" />}
+        {state === "done"      ? "Chrome Ready" :
+         state === "error"     ? "Launch Failed" :
+         state === "launching" ? "Launching..." : "Launch Chrome with Debug Port"}
+      </button>
+      {msg && <p className={`text-[9px] ${state === "error" ? "text-red-400" : "text-emerald-400"}`}>{msg}</p>}
+    </div>
+  );
+}
+
 export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImage, onUsageUpdate }) => {
-  const [url, setUrl] = useState("https://nettruyenviet10.com/");
+  const [url, setUrl] = useState("https://nettruyenviet10.com/truyen-tranh/thuan-tuy-bat-luong/chuong-10");
   const [htmlInput, setHtmlInput] = useState("");
   const [showManual, setShowManual] = useState(false);
   const [isAdvanced, setIsAdvanced] = useState(true);
@@ -40,6 +78,8 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "done" | "error">("idle");
+  const [browser, setBrowser] = useState<"chromium" | "firefox" | "webkit" | "live" | "edge">("chromium");
 
   const logPanelRef = useRef<HTMLDivElement>(null);
 
@@ -83,7 +123,7 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
         const response = await fetch("/api/crawl-playwright", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url, headless }),
+          body: JSON.stringify({ url, headless, browser }),
         });
 
         if (!response.ok || !response.body) {
@@ -208,6 +248,19 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
     }
   };
 
+  const handleSyncCookies = async () => {
+    setSyncStatus("syncing");
+    try {
+      await axios.post("/api/sync-chrome-cookies");
+      setSyncStatus("done");
+      setTimeout(() => setSyncStatus("idle"), 4000);
+    } catch (err: any) {
+      setSyncStatus("error");
+      setError(err.response?.data?.error || "Failed to sync cookies.");
+      setTimeout(() => setSyncStatus("idle"), 4000);
+    }
+  };
+
   const handleImageSelect = async (imgUrl: string) => {
     try {
       setStatus("Fetching image via proxy...");
@@ -255,6 +308,62 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
               {isLoading && !showManual ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
               {isAdvanced ? "Advanced" : "Bypass"}
             </button>
+            {isAdvanced && (
+              <button
+                type="button"
+                disabled={isLoading}
+                onClick={async (e) => {
+                  e.preventDefault();
+                  if (!url) return;
+                  setIsLoading(true);
+                  setError(null);
+                  setDebugImage(null);
+                  setImages([]);
+                  setLogs([]);
+                  setStatus("Opening browser (no auto-click)...");
+                  try {
+                    const response = await fetch("/api/crawl-playwright", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ url, headless: false, skipBypass: true, browser }),
+                    });
+                    if (!response.ok || !response.body) throw new Error(`Server error: ${response.status}`);
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = "";
+                    while (true) {
+                      const { done, value } = await reader.read();
+                      if (done) break;
+                      buffer += decoder.decode(value, { stream: true });
+                      const parts = buffer.split("\n\n");
+                      buffer = parts.pop() || "";
+                      for (const part of parts) {
+                        const line = part.trim();
+                        if (!line.startsWith("data: ")) continue;
+                        try {
+                          const data = JSON.parse(line.slice(6));
+                          if (data.type === "log") setLogs(prev => [...prev, data.message]);
+                          else if (data.type === "result") {
+                            if (data.debugImage) setDebugImage(data.debugImage);
+                            setImages(data.images || []);
+                          } else if (data.type === "error") setError(data.message);
+                        } catch (_) {}
+                      }
+                    }
+                  } catch (err: any) {
+                    setError(err.message || "Test browser failed.");
+                  } finally {
+                    setIsLoading(false);
+                    setStatus(null);
+                  }
+                }}
+                className="px-5 py-4 bg-[#F5F5F0] text-[#141414] rounded-2xl font-bold uppercase tracking-widest text-xs hover:scale-105 transition-transform disabled:opacity-50 disabled:scale-100 flex items-center gap-2"
+                title="Open browser without auto-clicking — inspect what Cloudflare sees"
+              >
+                <Search size={16} />
+                Test
+              </button>
+            )}
           </div>
 
           <div className="flex justify-center gap-6">
@@ -300,6 +409,67 @@ export const NettruyenCrawler: React.FC<NettruyenCrawlerProps> = ({ onSelectImag
               <Code size={12} /> {showManual ? "Hide AI Extraction" : "Use AI Extraction"}
             </button>
           </div>
+
+          {/* Browser selector */}
+          {isAdvanced && (
+            <div className="flex flex-col items-center gap-3">
+              <div className="flex justify-center gap-2">
+                {(["chromium", "firefox", "webkit", "live", "edge"] as const).map((b) => (
+                  <button
+                    key={b}
+                    type="button"
+                    onClick={() => setBrowser(b)}
+                    className={`px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all border ${
+                      browser === b
+                        ? "bg-[#141414] text-white border-[#141414]"
+                        : "bg-transparent text-[#141414]/40 border-[#141414]/10 hover:text-[#141414] hover:border-[#141414]/30"
+                    }`}
+                  >
+                    {b === "chromium" ? "Chrome" : b === "firefox" ? "Firefox" : b === "webkit" ? "Safari" : b === "live" ? "My Chrome" : "My Edge"}
+                  </button>
+                ))}
+              </div>
+
+              {/* Live Chrome setup instructions */}
+              {(browser === "live" || browser === "edge") && (
+                <div className="w-full p-4 bg-[#141414] rounded-2xl text-left animate-in fade-in duration-300 space-y-2">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">
+                    Your real {browser === "edge" ? "Edge" : "Chrome"} profile
+                  </p>
+                  <p className="text-[10px] text-white/60 leading-relaxed">
+                    Opens your actual {browser === "edge" ? "Edge" : "Chrome"} with all cookies, logins, and Cloudflare trust. {browser === "edge" ? "Edge" : "Chrome"} will be closed briefly while the crawler runs, then you can reopen it normally.
+                  </p>
+                  <p className="text-[9px] text-amber-400/80 leading-relaxed">
+                    ⚠ Save any open work in {browser === "edge" ? "Edge" : "Chrome"} before crawling.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Sync Chrome Cookies */}
+          {isAdvanced && (
+            <div className="flex items-center justify-center">
+              <button
+                type="button"
+                onClick={handleSyncCookies}
+                disabled={syncStatus === "syncing"}
+                className={`text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-2 transition-all px-4 py-2 rounded-xl border ${
+                  syncStatus === "done"
+                    ? "text-emerald-600 border-emerald-200 bg-emerald-50"
+                    : syncStatus === "error"
+                    ? "text-red-500 border-red-200 bg-red-50"
+                    : "text-[#141414]/50 border-[#141414]/10 hover:text-[#141414] hover:border-[#141414]/30 bg-transparent"
+                }`}
+              >
+                <RefreshCw size={11} className={syncStatus === "syncing" ? "animate-spin" : ""} />
+                {syncStatus === "syncing" && "Syncing cookies..."}
+                {syncStatus === "done" && "Cookies synced! Cloudflare trust imported"}
+                {syncStatus === "error" && "Sync failed — see error below"}
+                {syncStatus === "idle" && "Sync Chrome Cookies"}
+              </button>
+            </div>
+          )}
 
           {/* Real-time Log Panel — shown during/after advanced mode crawl */}
           {isAdvanced && logs.length > 0 && (
